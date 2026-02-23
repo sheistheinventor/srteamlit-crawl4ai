@@ -26,42 +26,16 @@ Analyze this website and return ONLY a valid JSON object — no explanation, no 
   "multi_location": true or false,
   "estimated_company_size": "small / medium / large",
   "score": 0-100,
-  "review_platform_mentions": ["yelp", "google", "angi"],
-  "has_competitor_tool": true or false,
-  "competitor_tool_name": "string or null",
-  "has_testimonials_page": true or false,
-  "testimonials_are_static": true or false,
-  "has_review_widget": true or false,
-  "trust_signals_general": true or false,
-  "has_bbb_badge": true or false,
-  "is_licensed_insured_mentioned": true or false,
-  "has_multiple_service_area_pages": true or false,
-  "has_quote_or_contact_form": true or false,
   "contact_info_found": true or false,
-  "has_careers_or_jobs_page": true or false,
-  "site_appears_active": true or false,
-  "is_national_chain": true or false,
-  "owner_responds_to_reviews": true or false
+  "site_appears_active": true or false
 }}
 
 SCORING GUIDE (score must stay between 0 and 100):
 ADD points:
-- has_competitor_tool = true: +25
-- review_platform_mentions has 2 or more: +15
-- has_testimonials_page AND testimonials_are_static = true: +15
 - multi_location = true: +10
-- has_multiple_service_area_pages = true: +10
-- has_quote_or_contact_form = true: +5
-- has_bbb_badge = true: +5
-- is_licensed_insured_mentioned = true: +3
-- trust_signals_general = true: +2
-- has_careers_or_jobs_page = true: +5
 - site_appears_active = true: +5
-- has_review_widget = true: +5
-- owner_responds_to_reviews = true: +5
 
 DEDUCT points:
-- is_national_chain = true: -50
 - site_appears_active = false: -20
 - contact_info_found = false: -20
 
@@ -85,22 +59,8 @@ async def crawl_and_extract(url: str, prompt: str) -> dict:
         "multi_location": None,
         "estimated_company_size": None,
         "score": 0,
-        "review_platform_mentions": [],
-        "has_competitor_tool": None,
-        "competitor_tool_name": None,
-        "has_testimonials_page": None,
-        "testimonials_are_static": None,
-        "has_review_widget": None,
-        "trust_signals_general": None,
-        "has_bbb_badge": None,
-        "is_licensed_insured_mentioned": None,
-        "has_multiple_service_area_pages": None,
-        "has_quote_or_contact_form": None,
         "contact_info_found": None,
-        "has_careers_or_jobs_page": None,
         "site_appears_active": None,
-        "is_national_chain": None,
-        "owner_responds_to_reviews": None,
         "crawl_status": "Not attempted"
     }
 
@@ -300,17 +260,15 @@ if uploaded_file:
                     skip_reason = row.get("skip_reason", "No reason provided")
                     score = row.get("score", 0)
                     size = row.get("estimated_company_size", "Unknown")
-                    is_chain = row.get("is_national_chain", False)
 
                     with st.expander(f"❌  {biz_name}  —  {biz_url}"):
                         col_a, col_b = st.columns([3, 1])
 
                         with col_a:
                             st.error(f"**Why it was skipped:** {skip_reason}")
-                            col_i1, col_i2, col_i3 = st.columns(3)
+                            col_i1, col_i2 = st.columns(2)
                             col_i1.metric("Score", f"{score}/100")
                             col_i2.metric("Size", size or "Unknown")
-                            col_i3.metric("National Chain", "Yes ⚠️" if is_chain else "No")
 
                             if row.get("crawl_status") != "Success":
                                 st.warning(f"Crawl status: {row.get('crawl_status')}")
@@ -341,9 +299,8 @@ if uploaded_file:
 
             display_cols = [
                 name_col_s, website_col_s, "score", "owner_name",
-                "estimated_company_size", "has_competitor_tool", "competitor_tool_name",
-                "multi_location", "review_platform_mentions", "has_bbb_badge",
-                "is_licensed_insured_mentioned", "crawl_status"
+                "estimated_company_size", "multi_location",
+                "contact_info_found", "site_appears_active", "crawl_status"
             ]
             display_cols = [c for c in display_cols if c in qualified.columns]
 
@@ -396,10 +353,6 @@ else:
         | 📍 Multi-location | Does the business have multiple locations? |
         | 📏 Company size | Small / Medium / Large estimate |
         | 🏆 Score 0-100 | How likely they need your service |
-        | 🛠️ Competitor tool | Already using Podium, Birdeye, Yext, etc.? |
-        | ⭐ Review platforms | Yelp, Google, Angi mentions |
-        | 🏅 BBB badge | Do they display a BBB badge? |
-        | 📋 Testimonials | Static page vs live review widget |
-        | 📞 Contact form | Do they have a quote or contact form? |
-        | 🏢 National chain | Flagged and scored down heavily |
+        | 📞 Contact info | Is contact information visible on site? |
+        | 🌐 Site active | Does the site appear active/maintained? |
         """)
