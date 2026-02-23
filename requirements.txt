@@ -1,5 +1,5 @@
 streamlit
-crawl4ai
+openai
 pandas
 openpyxl
 requests
