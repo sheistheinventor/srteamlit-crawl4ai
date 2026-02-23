@@ -133,16 +133,33 @@ async def crawl_and_extract(url: str, prompt: str) -> dict:
             if response.success and response.extracted_content:
                 raw = response.extracted_content
                 raw = re.sub(r"```json|```", "", raw).strip()
-                data = json.loads(raw)
+
+                parsed = json.loads(raw)
+
+                # LLMExtractionStrategy wraps results in a list — unwrap it
+                if isinstance(parsed, list) and len(parsed) > 0:
+                    data = parsed[0]
+                elif isinstance(parsed, dict):
+                    data = parsed
+                else:
+                    default["crawl_status"] = "Unexpected response format"
+                    return default
+
                 data["crawl_status"] = "Success"
                 data["score"] = max(0, min(100, int(data.get("score", 0))))
+
+                # Normalize fits_niche to proper bool in case LLM returns string
+                fn = data.get("fits_niche")
+                if isinstance(fn, str):
+                    data["fits_niche"] = fn.lower() == "true"
+
                 return data
             else:
                 default["crawl_status"] = "Failed to load page"
                 return default
 
-    except json.JSONDecodeError:
-        default["crawl_status"] = "JSON parse error"
+    except json.JSONDecodeError as e:
+        default["crawl_status"] = f"JSON parse error: {str(e)[:40]}"
         return default
     except Exception as e:
         default["crawl_status"] = f"Error: {str(e)[:60]}"
