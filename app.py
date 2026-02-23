@@ -110,13 +110,17 @@ async def crawl_and_extract(url: str, prompt: str) -> dict:
         url = "https://" + url
 
     try:
-        from crawl4ai import AsyncWebCrawler
+        from crawl4ai import AsyncWebCrawler, LLMConfig
         from crawl4ai.async_configs import BrowserConfig, CrawlerRunConfig
         from crawl4ai.extraction_strategy import LLMExtractionStrategy
 
-        strategy = LLMExtractionStrategy(
+        llm_config = LLMConfig(
             provider="openai/gpt-4o-mini",
             api_token=st.session_state.get("openai_key", ""),
+        )
+
+        strategy = LLMExtractionStrategy(
+            llm_config=llm_config,
             instruction=prompt,
         )
 
