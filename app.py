@@ -74,6 +74,10 @@ Score cannot go below 0 or above 100.
 # ── Crawl Function ────────────────────────────────────────────────────────────
 
 async def crawl_and_extract(url: str, prompt: str) -> dict:
+    import requests
+    from bs4 import BeautifulSoup
+    from openai import OpenAI
+
     default = {
         "fits_niche": None,
         "skip_reason": "Not crawled",
@@ -109,64 +113,54 @@ async def crawl_and_extract(url: str, prompt: str) -> dict:
     if not url.startswith("http"):
         url = "https://" + url
 
+    # Step 1: Fetch the page with requests (no browser needed)
     try:
-        from crawl4ai import AsyncWebCrawler, LLMConfig
-        from crawl4ai.async_configs import BrowserConfig, CrawlerRunConfig
-        from crawl4ai.extraction_strategy import LLMExtractionStrategy
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+        }
+        resp = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
 
-        llm_config = LLMConfig(
-            provider="openai/gpt-4o-mini",
-            api_token=st.session_state.get("openai_key", ""),
+        for tag in soup(["script", "style", "noscript", "nav", "footer"]):
+            tag.decompose()
+
+        page_text = soup.get_text(separator=" ", strip=True)
+        page_text = page_text[:8000]
+
+    except Exception as e:
+        default["crawl_status"] = f"Fetch error: {str(e)[:60]}"
+        return default
+
+    # Step 2: Send to OpenAI for analysis
+    try:
+        client = OpenAI(api_key=st.session_state.get("openai_key", ""))
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": f"Website URL: {url}\n\nWebsite content:\n{page_text}"}
+            ],
+            temperature=0,
+            response_format={"type": "json_object"}
         )
 
-        strategy = LLMExtractionStrategy(
-            llm_config=llm_config,
-            instruction=prompt,
-        )
+        raw = response.choices[0].message.content
+        data = json.loads(raw)
+        data["crawl_status"] = "Success"
+        data["score"] = max(0, min(100, int(data.get("score", 0))))
 
-        browser_config = BrowserConfig(headless=True, verbose=False)
-        crawl_config = CrawlerRunConfig(
-            extraction_strategy=strategy,
-            word_count_threshold=10,
-            excluded_tags=["nav", "footer"],
-        )
+        fn = data.get("fits_niche")
+        if isinstance(fn, str):
+            data["fits_niche"] = fn.lower() == "true"
 
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            response = await crawler.arun(url=url, config=crawl_config)
-
-            if response.success and response.extracted_content:
-                raw = response.extracted_content
-                raw = re.sub(r"```json|```", "", raw).strip()
-
-                parsed = json.loads(raw)
-
-                # LLMExtractionStrategy wraps results in a list — unwrap it
-                if isinstance(parsed, list) and len(parsed) > 0:
-                    data = parsed[0]
-                elif isinstance(parsed, dict):
-                    data = parsed
-                else:
-                    default["crawl_status"] = "Unexpected response format"
-                    return default
-
-                data["crawl_status"] = "Success"
-                data["score"] = max(0, min(100, int(data.get("score", 0))))
-
-                # Normalize fits_niche to proper bool in case LLM returns string
-                fn = data.get("fits_niche")
-                if isinstance(fn, str):
-                    data["fits_niche"] = fn.lower() == "true"
-
-                return data
-            else:
-                default["crawl_status"] = "Failed to load page"
-                return default
+        return data
 
     except json.JSONDecodeError as e:
         default["crawl_status"] = f"JSON parse error: {str(e)[:40]}"
         return default
     except Exception as e:
-        default["crawl_status"] = f"Error: {str(e)[:60]}"
+        default["crawl_status"] = f"OpenAI error: {str(e)[:60]}"
         return default
 
 
