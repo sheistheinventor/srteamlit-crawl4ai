@@ -8,58 +8,102 @@ from io import BytesIO
 st.set_page_config(page_title="Lead Enrichment Tool", page_icon="🔍", layout="wide")
 
 st.title("🔍 Lead Enrichment Tool")
-st.markdown("Upload your spreadsheet, select the website column, and we'll enrich each business with owner name, location signals, and existing review tools.")
+st.markdown("Upload your spreadsheet, define your niche, and we'll crawl each website to score and qualify your leads.")
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# ── Prompt Builder ────────────────────────────────────────────────────────────
 
-REVIEW_TOOL_KEYWORDS = [
-    "podium", "birdeye", "grade.us", "reviewtrackers", "reputation.com",
-    "yext", "trustpilot", "reviewbuzz", "swell", "broadly", "signpost",
-    "widewail", "gominga", "rize reviews", "synup"
-]
+def build_prompt(niche: str) -> str:
+    return f"""
+You are evaluating a business website for a reputation management company.
+The target niche is: {niche}
 
-MULTI_LOCATION_KEYWORDS = [
-    "locations", "our locations", "find a location", "service areas",
-    "branches", "franchise", "nationwide", "offices", "headquarters"
-]
+Analyze this website and return ONLY a valid JSON object — no explanation, no markdown, no extra text.
 
-def detect_review_tools(text: str) -> str:
-    text_lower = text.lower()
-    found = [tool for tool in REVIEW_TOOL_KEYWORDS if tool in text_lower]
-    return ", ".join(found) if found else "None detected"
+{{
+  "fits_niche": true or false,
+  "skip_reason": "required string if fits_niche is false, otherwise null",
+  "owner_name": "string or null",
+  "multi_location": true or false,
+  "estimated_company_size": "small / medium / large",
+  "score": 0-100,
+  "review_platform_mentions": ["yelp", "google", "angi"],
+  "has_competitor_tool": true or false,
+  "competitor_tool_name": "string or null",
+  "has_testimonials_page": true or false,
+  "testimonials_are_static": true or false,
+  "has_review_widget": true or false,
+  "trust_signals_general": true or false,
+  "has_bbb_badge": true or false,
+  "is_licensed_insured_mentioned": true or false,
+  "has_multiple_service_area_pages": true or false,
+  "has_quote_or_contact_form": true or false,
+  "contact_info_found": true or false,
+  "has_careers_or_jobs_page": true or false,
+  "site_appears_active": true or false,
+  "is_national_chain": true or false,
+  "owner_responds_to_reviews": true or false
+}}
 
-def detect_multi_location(text: str) -> str:
-    text_lower = text.lower()
-    found = [kw for kw in MULTI_LOCATION_KEYWORDS if kw in text_lower]
-    return "Yes" if found else "No"
+SCORING GUIDE (score must stay between 0 and 100):
+ADD points:
+- has_competitor_tool = true: +25
+- review_platform_mentions has 2 or more: +15
+- has_testimonials_page AND testimonials_are_static = true: +15
+- multi_location = true: +10
+- has_multiple_service_area_pages = true: +10
+- has_quote_or_contact_form = true: +5
+- has_bbb_badge = true: +5
+- is_licensed_insured_mentioned = true: +3
+- trust_signals_general = true: +2
+- has_careers_or_jobs_page = true: +5
+- site_appears_active = true: +5
+- has_review_widget = true: +5
+- owner_responds_to_reviews = true: +5
 
-def extract_owner_name(text: str) -> str:
-    """Simple heuristic: look for 'founded by', 'owner', 'president', etc."""
-    patterns = [
-        r'(?:founded by|owner|president|ceo|principal|proprietor)[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)',
-        r'(?:meet|about)\s+([A-Z][a-z]+ [A-Z][a-z]+)',
-        r'([A-Z][a-z]+ [A-Z][a-z]+),?\s+(?:owner|founder|president|ceo)',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-    return "Not found"
+DEDUCT points:
+- is_national_chain = true: -50
+- site_appears_active = false: -20
+- contact_info_found = false: -20
 
-async def crawl_website(url: str) -> dict:
-    """Crawl a single website and extract enrichment data."""
-    result = {
-        "owner_name": "Not found",
-        "multi_location": "Unknown",
-        "review_tools": "None detected",
-        "has_website": "Yes",
-        "crawl_status": "Success"
+If fits_niche is false, skip_reason must be a clear one-sentence explanation.
+If fits_niche is false, still attempt to fill remaining fields where possible.
+Score cannot go below 0 or above 100.
+""".strip()
+
+
+# ── Crawl Function ────────────────────────────────────────────────────────────
+
+async def crawl_and_extract(url: str, prompt: str) -> dict:
+    default = {
+        "fits_niche": None,
+        "skip_reason": "Not crawled",
+        "owner_name": None,
+        "multi_location": None,
+        "estimated_company_size": None,
+        "score": 0,
+        "review_platform_mentions": [],
+        "has_competitor_tool": None,
+        "competitor_tool_name": None,
+        "has_testimonials_page": None,
+        "testimonials_are_static": None,
+        "has_review_widget": None,
+        "trust_signals_general": None,
+        "has_bbb_badge": None,
+        "is_licensed_insured_mentioned": None,
+        "has_multiple_service_area_pages": None,
+        "has_quote_or_contact_form": None,
+        "contact_info_found": None,
+        "has_careers_or_jobs_page": None,
+        "site_appears_active": None,
+        "is_national_chain": None,
+        "owner_responds_to_reviews": None,
+        "crawl_status": "Not attempted"
     }
 
     if not url or pd.isna(url) or str(url).strip() == "":
-        result["has_website"] = "No"
-        result["crawl_status"] = "No URL"
-        return result
+        default["skip_reason"] = "No URL provided"
+        default["crawl_status"] = "No URL"
+        return default
 
     url = str(url).strip()
     if not url.startswith("http"):
@@ -68,60 +112,89 @@ async def crawl_website(url: str) -> dict:
     try:
         from crawl4ai import AsyncWebCrawler
         from crawl4ai.async_configs import BrowserConfig, CrawlerRunConfig
+        from crawl4ai.extraction_strategy import LLMExtractionStrategy
+
+        strategy = LLMExtractionStrategy(
+            provider="openai/gpt-4o-mini",
+            api_token=st.session_state.get("openai_key", ""),
+            instruction=prompt,
+        )
 
         browser_config = BrowserConfig(headless=True, verbose=False)
         crawl_config = CrawlerRunConfig(
+            extraction_strategy=strategy,
             word_count_threshold=10,
-            excluded_tags=["nav", "footer", "header"],
-            exclude_external_links=True,
+            excluded_tags=["nav", "footer"],
         )
 
         async with AsyncWebCrawler(config=browser_config) as crawler:
             response = await crawler.arun(url=url, config=crawl_config)
 
-            if response.success:
-                text = response.markdown or ""
-                result["owner_name"] = extract_owner_name(text)
-                result["multi_location"] = detect_multi_location(text)
-                result["review_tools"] = detect_review_tools(text)
+            if response.success and response.extracted_content:
+                raw = response.extracted_content
+                raw = re.sub(r"```json|```", "", raw).strip()
+                data = json.loads(raw)
+                data["crawl_status"] = "Success"
+                data["score"] = max(0, min(100, int(data.get("score", 0))))
+                return data
             else:
-                result["crawl_status"] = "Failed to load"
+                default["crawl_status"] = "Failed to load page"
+                return default
 
-    except ImportError:
-        # Fallback if crawl4ai not installed - use basic requests
-        try:
-            import requests
-            from bs4 import BeautifulSoup
-            headers = {"User-Agent": "Mozilla/5.0"}
-            resp = requests.get(url, timeout=10, headers=headers)
-            soup = BeautifulSoup(resp.text, "html.parser")
-            text = soup.get_text(separator=" ", strip=True)
-            result["owner_name"] = extract_owner_name(text)
-            result["multi_location"] = detect_multi_location(text)
-            result["review_tools"] = detect_review_tools(text)
-        except Exception as e:
-            result["crawl_status"] = f"Error: {str(e)[:50]}"
-
+    except json.JSONDecodeError:
+        default["crawl_status"] = "JSON parse error"
+        return default
     except Exception as e:
-        result["crawl_status"] = f"Error: {str(e)[:50]}"
+        default["crawl_status"] = f"Error: {str(e)[:60]}"
+        return default
 
-    return result
 
-
-async def enrich_batch(urls: list, progress_bar, status_text) -> list:
+async def enrich_batch(urls, prompt, progress_bar, status_text):
     results = []
     total = len(urls)
     for i, url in enumerate(urls):
-        status_text.text(f"Processing {i+1} of {total}: {str(url)[:60]}")
-        result = await crawl_website(url)
+        status_text.text(f"Crawling {i+1} of {total}: {str(url)[:70]}")
+        result = await crawl_and_extract(url, prompt)
         results.append(result)
         progress_bar.progress((i + 1) / total)
     return results
 
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
-uploaded_file = st.file_uploader("Upload your spreadsheet (.xlsx or .csv)", type=["xlsx", "csv"])
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    openai_key = st.text_input("OpenAI API Key", type="password", help="Required for AI extraction")
+    if openai_key:
+        st.session_state["openai_key"] = openai_key
+        st.success("✅ API key saved")
+
+    st.markdown("---")
+    st.markdown("**Score Thresholds**")
+    min_score = st.slider("Minimum score to include in qualified list", 0, 100, 30)
+    st.caption(f"Leads below {min_score} will be excluded from the qualified download")
+
+
+# ── Niche Definition ──────────────────────────────────────────────────────────
+
+st.subheader("🎯 Step 1 — Define Your Niche")
+st.caption("Be specific. This is passed directly to the AI when it reads each website.")
+
+niche_input = st.text_area(
+    "What type of business are you targeting?",
+    value="Moving companies, movers, relocation services, and moving & storage businesses. "
+          "These are local or regional companies that help people and businesses move their "
+          "belongings from one location to another. They typically offer packing, loading, "
+          "transport, and storage services.",
+    height=110,
+)
+
+st.markdown("---")
+
+# ── File Upload ───────────────────────────────────────────────────────────────
+
+st.subheader("📂 Step 2 — Upload Your Spreadsheet")
+uploaded_file = st.file_uploader("Upload .xlsx or .csv", type=["xlsx", "csv"])
 
 if uploaded_file:
     try:
@@ -130,75 +203,188 @@ if uploaded_file:
         else:
             df = pd.read_excel(uploaded_file)
 
-        st.success(f"✅ Loaded {len(df)} rows and {len(df.columns)} columns")
+        st.success(f"✅ Loaded {len(df)} rows")
         st.dataframe(df.head(5), use_container_width=True)
 
-        # Column selector
         col1, col2 = st.columns(2)
         with col1:
             website_col = st.selectbox(
-                "Select the column containing website URLs",
+                "Website URL column",
                 options=df.columns.tolist(),
-                index=next((i for i, c in enumerate(df.columns) if "web" in c.lower() or "url" in c.lower() or "site" in c.lower()), 0)
+                index=next((i for i, c in enumerate(df.columns) if any(k in c.lower() for k in ["web", "url", "site"])), 0)
             )
         with col2:
             name_col = st.selectbox(
-                "Select the column containing business names",
+                "Business name column",
                 options=df.columns.tolist(),
                 index=next((i for i, c in enumerate(df.columns) if "name" in c.lower()), 0)
             )
 
-        # Row limit
-        max_rows = st.slider("How many rows to process?", min_value=1, max_value=len(df), value=min(50, len(df)))
+        max_rows = st.slider("How many rows to process?", 1, len(df), min(25, len(df)))
         df_sample = df.head(max_rows).copy()
 
-        st.info(f"Will enrich {max_rows} businesses. Each crawl takes ~3-5 seconds.")
+        st.info(f"Will crawl {max_rows} websites. Estimated time: {max_rows * 5 // 60}m {max_rows * 5 % 60}s")
 
+        if not st.session_state.get("openai_key"):
+            st.warning("⚠️ Add your OpenAI API key in the sidebar to enable AI extraction.")
+
+        # ── Run ───────────────────────────────────────────────────────────
         if st.button("🚀 Start Enrichment", type="primary"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            if not st.session_state.get("openai_key"):
+                st.error("OpenAI API key required. Add it in the sidebar.")
+            else:
+                prompt = build_prompt(niche_input)
+                progress_bar = st.progress(0)
+                status_text = st.empty()
 
-            urls = df_sample[website_col].tolist()
-            results = asyncio.run(enrich_batch(urls, progress_bar, status_text))
+                urls = df_sample[website_col].tolist()
+                results = asyncio.run(enrich_batch(urls, prompt, progress_bar, status_text))
 
-            # Add results to dataframe
-            df_sample["owner_name"] = [r["owner_name"] for r in results]
-            df_sample["multi_location"] = [r["multi_location"] for r in results]
-            df_sample["review_tools_detected"] = [r["review_tools"] for r in results]
-            df_sample["has_website"] = [r["has_website"] for r in results]
-            df_sample["crawl_status"] = [r["crawl_status"] for r in results]
+                results_df = pd.DataFrame(results)
+                df_enriched = pd.concat([df_sample.reset_index(drop=True), results_df], axis=1)
 
-            status_text.text("✅ Done!")
-            st.success(f"Enriched {max_rows} businesses!")
+                status_text.text("✅ Done!")
+                st.session_state["df_enriched"] = df_enriched
+                st.session_state["name_col"] = name_col
+                st.session_state["website_col"] = website_col
+                st.session_state["min_score"] = min_score
+                st.session_state["overrides"] = {}
 
-            # Show results
-            st.subheader("Enriched Results")
-            st.dataframe(df_sample[[name_col, website_col, "owner_name", "multi_location", "review_tools_detected", "crawl_status"]], use_container_width=True)
+        # ── Results ───────────────────────────────────────────────────────
+        if "df_enriched" in st.session_state:
+            df_enriched = st.session_state["df_enriched"]
+            name_col_s = st.session_state["name_col"]
+            website_col_s = st.session_state["website_col"]
 
-            # Download
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df_sample.to_excel(writer, index=False, sheet_name="Enriched Leads")
-            output.seek(0)
+            st.divider()
+            st.subheader("📊 Step 3 — Review Results")
 
-            st.download_button(
-                label="📥 Download Enriched Spreadsheet",
-                data=output,
-                file_name="enriched_leads.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            fits = df_enriched[df_enriched["fits_niche"] == True]
+            doesnt_fit = df_enriched[df_enriched["fits_niche"] == False]
+            unclear = df_enriched[df_enriched["fits_niche"].isna()]
+            high_score = df_enriched[df_enriched["score"] >= 60]
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("✅ Fits Niche", len(fits))
+            c2.metric("❌ Doesn't Fit", len(doesnt_fit))
+            c3.metric("❓ Unclear", len(unclear))
+            c4.metric("🔥 Score 60+", len(high_score))
+
+            # ── Niche Rejection Pop-ups ───────────────────────────────────
+            if len(doesnt_fit) > 0:
+                st.divider()
+                st.subheader("❌ Businesses That Don't Fit Your Niche")
+                st.caption("The AI flagged these as outside your niche. Review each one and override if needed.")
+
+                if "overrides" not in st.session_state:
+                    st.session_state["overrides"] = {}
+
+                for idx, row in doesnt_fit.iterrows():
+                    biz_name = row.get(name_col_s, "Unknown Business")
+                    biz_url = row.get(website_col_s, "")
+                    skip_reason = row.get("skip_reason", "No reason provided")
+                    score = row.get("score", 0)
+                    size = row.get("estimated_company_size", "Unknown")
+                    is_chain = row.get("is_national_chain", False)
+
+                    with st.expander(f"❌  {biz_name}  —  {biz_url}"):
+                        col_a, col_b = st.columns([3, 1])
+
+                        with col_a:
+                            st.error(f"**Why it was skipped:** {skip_reason}")
+                            col_i1, col_i2, col_i3 = st.columns(3)
+                            col_i1.metric("Score", f"{score}/100")
+                            col_i2.metric("Size", size or "Unknown")
+                            col_i3.metric("National Chain", "Yes ⚠️" if is_chain else "No")
+
+                            if row.get("crawl_status") != "Success":
+                                st.warning(f"Crawl status: {row.get('crawl_status')}")
+
+                        with col_b:
+                            st.markdown("**Your decision:**")
+                            override = st.radio(
+                                "",
+                                ["Skip this one", "Include anyway"],
+                                key=f"override_{idx}",
+                                label_visibility="collapsed"
+                            )
+                            st.session_state["overrides"][idx] = override
+
+            # ── Qualified Leads Table ─────────────────────────────────────
+            st.divider()
+            st.subheader("✅ Qualified Leads")
+
+            overrides = st.session_state.get("overrides", {})
+            override_indices = [idx for idx, val in overrides.items() if val == "Include anyway"]
+
+            qualified = df_enriched[
+                (df_enriched["fits_niche"] == True) |
+                (df_enriched.index.isin(override_indices))
+            ].copy()
+            qualified = qualified[qualified["score"] >= st.session_state.get("min_score", 30)]
+            qualified = qualified.sort_values("score", ascending=False)
+
+            display_cols = [
+                name_col_s, website_col_s, "score", "owner_name",
+                "estimated_company_size", "has_competitor_tool", "competitor_tool_name",
+                "multi_location", "review_platform_mentions", "has_bbb_badge",
+                "is_licensed_insured_mentioned", "crawl_status"
+            ]
+            display_cols = [c for c in display_cols if c in qualified.columns]
+
+            st.dataframe(qualified[display_cols], use_container_width=True)
+
+            # ── Downloads ─────────────────────────────────────────────────
+            st.divider()
+            st.subheader("📥 Download")
+            col_dl1, col_dl2 = st.columns(2)
+
+            with col_dl1:
+                out_q = BytesIO()
+                with pd.ExcelWriter(out_q, engine="openpyxl") as writer:
+                    qualified.to_excel(writer, index=False, sheet_name="Qualified Leads")
+                out_q.seek(0)
+                st.download_button(
+                    "📥 Qualified Leads Only",
+                    data=out_q,
+                    file_name="qualified_leads.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+            with col_dl2:
+                out_all = BytesIO()
+                with pd.ExcelWriter(out_all, engine="openpyxl") as writer:
+                    df_enriched.to_excel(writer, index=False, sheet_name="All Results")
+                out_all.seek(0)
+                st.download_button(
+                    "📥 All Results (including skipped)",
+                    data=out_all,
+                    file_name="all_enriched_leads.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
     except Exception as e:
         st.error(f"Error reading file: {e}")
 
 else:
-    st.info("👆 Upload a spreadsheet to get started")
+    st.info("👆 Upload a spreadsheet above to get started")
 
-    with st.expander("What does this tool extract?"):
+    with st.expander("📖 What does this tool extract?"):
         st.markdown("""
-        For each business website, the tool attempts to find:
-        - **Owner Name** — scans About/Team pages for founder or owner mentions
-        - **Multi-Location** — detects if the business has multiple locations (flags for removal)
-        - **Review Tools** — detects if they already use Podium, Birdeye, Yext, etc.
-        - **Crawl Status** — lets you know if a site failed to load
+        For each business website the AI reads the page and extracts:
+
+        | Field | Description |
+        |---|---|
+        | ✅ Fits niche | Does this site match your target business type? |
+        | ❌ Skip reason | If it doesn't fit — exactly why not |
+        | 👤 Owner name | Founder or owner name from About/Team page |
+        | 📍 Multi-location | Does the business have multiple locations? |
+        | 📏 Company size | Small / Medium / Large estimate |
+        | 🏆 Score 0-100 | How likely they need your service |
+        | 🛠️ Competitor tool | Already using Podium, Birdeye, Yext, etc.? |
+        | ⭐ Review platforms | Yelp, Google, Angi mentions |
+        | 🏅 BBB badge | Do they display a BBB badge? |
+        | 📋 Testimonials | Static page vs live review widget |
+        | 📞 Contact form | Do they have a quote or contact form? |
+        | 🏢 National chain | Flagged and scored down heavily |
         """)
