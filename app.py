@@ -2,19 +2,31 @@ import streamlit as st
 import pandas as pd
 import asyncio
 import json
-import re
 from io import BytesIO
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+MIN_SCORE = 60
 
 st.set_page_config(page_title="Lead Enrichment Tool", page_icon="🔍", layout="wide")
 
 st.title("🔍 Lead Enrichment Tool")
-st.markdown("Upload your spreadsheet, define your niche, and we'll crawl each website to score and qualify your leads.")
+st.markdown("Upload your spreadsheet, define your niche, and we'll score each website to qualify your leads.")
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    openai_key = st.text_input("OpenAI API Key", type="password")
+    if openai_key:
+        st.session_state["openai_key"] = openai_key
+        st.success("✅ API key saved")
 
 # ── Prompt Builder ────────────────────────────────────────────────────────────
 
 def build_prompt(niche: str) -> str:
     return f"""
-You are evaluating a business website for a reputation management company.
+You are evaluating a business website for a reputation management / review alert service.
 The target niche is: {niche}
 
 Analyze this website and return ONLY a valid JSON object — no explanation, no markdown, no extra text.
@@ -23,25 +35,41 @@ Analyze this website and return ONLY a valid JSON object — no explanation, no 
   "fits_niche": true or false,
   "skip_reason": "required string if fits_niche is false, otherwise null",
   "owner_name": "string or null",
-  "multi_location": true or false,
+  "owner_operated": true or false,
   "estimated_company_size": "small / medium / large",
-  "score": 0-100,
-  "contact_info_found": true or false,
-  "site_appears_active": true or false
+  "site_appears_active": true or false,
+  "multi_platform_mentions": true or false,
+  "platforms_found": ["list of platforms found e.g. Yelp, Google, Thumbtack, Angi, HomeAdvisor, BBB, Houzz"],
+  "review_cta_present": true or false,
+  "testimonials_page": true or false,
+  "urgency_signal": true or false,
+  "urgency_detail": "string describing urgency signal if found, otherwise null",
+  "score": 0-100
 }}
 
+DEFINITIONS:
+- multi_platform_mentions: Site mentions or links to any of these platforms: Yelp, Thumbtack, Google Reviews, Angi, HomeAdvisor, BBB, Houzz
+- review_cta_present: Site actively asks customers to leave a review (button, link, text prompt)
+- testimonials_page: Site has a manual/static testimonials or reviews page with no automated review widget
+- urgency_signal: Site mentions or links to review platforms but has NO system in place to manage or respond to them — indicating an unmanaged reputation gap
+- owner_operated: A named owner or founder is identifiable on the site (About page, bio, signature, etc.)
+
 SCORING GUIDE (score must stay between 0 and 100):
+
 ADD points:
-- multi_location = true: +10
-- site_appears_active = true: +5
+- multi_platform_mentions = true: +30
+- urgency_signal = true: +20
+- review_cta_present = false: +15
+- owner_operated = true: +15
+- testimonials_page = true (with no automation): +10
+- site_appears_active = true: +10
 
 DEDUCT points:
-- site_appears_active = false: -20
-- contact_info_found = false: -20
+- site_appears_active = false: -30
+- owner_operated = false (corporate/franchise): -20
 
-If fits_niche is false, skip_reason must be a clear one-sentence explanation.
-If fits_niche is false, still attempt to fill remaining fields where possible.
 Score cannot go below 0 or above 100.
+If fits_niche is false, skip_reason must be a clear one-sentence explanation.
 """.strip()
 
 
@@ -56,11 +84,16 @@ async def crawl_and_extract(url: str, prompt: str) -> dict:
         "fits_niche": None,
         "skip_reason": "Not crawled",
         "owner_name": None,
-        "multi_location": None,
+        "owner_operated": None,
         "estimated_company_size": None,
-        "score": 0,
-        "contact_info_found": None,
         "site_appears_active": None,
+        "multi_platform_mentions": None,
+        "platforms_found": [],
+        "review_cta_present": None,
+        "testimonials_page": None,
+        "urgency_signal": None,
+        "urgency_detail": None,
+        "score": 0,
         "crawl_status": "Not attempted"
     }
 
@@ -73,7 +106,6 @@ async def crawl_and_extract(url: str, prompt: str) -> dict:
     if not url.startswith("http"):
         url = "https://" + url
 
-    # Step 1: Fetch the page with requests (no browser needed)
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
@@ -91,7 +123,6 @@ async def crawl_and_extract(url: str, prompt: str) -> dict:
         default["crawl_status"] = f"Fetch error: {str(e)[:60]}"
         return default
 
-    # Step 2: Send to OpenAI for analysis
     try:
         client = OpenAI(api_key=st.session_state.get("openai_key", ""))
 
@@ -110,9 +141,12 @@ async def crawl_and_extract(url: str, prompt: str) -> dict:
         data["crawl_status"] = "Success"
         data["score"] = max(0, min(100, int(data.get("score", 0))))
 
-        fn = data.get("fits_niche")
-        if isinstance(fn, str):
-            data["fits_niche"] = fn.lower() == "true"
+        for bool_field in ["fits_niche", "owner_operated", "site_appears_active",
+                           "multi_platform_mentions", "review_cta_present",
+                           "testimonials_page", "urgency_signal"]:
+            val = data.get(bool_field)
+            if isinstance(val, str):
+                data[bool_field] = val.lower() == "true"
 
         return data
 
@@ -135,21 +169,6 @@ async def enrich_batch(urls, prompt, progress_bar, status_text):
     return results
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    openai_key = st.text_input("OpenAI API Key", type="password", help="Required for AI extraction")
-    if openai_key:
-        st.session_state["openai_key"] = openai_key
-        st.success("✅ API key saved")
-
-    st.markdown("---")
-    st.markdown("**Score Thresholds**")
-    min_score = st.slider("Minimum score to include in qualified list", 0, 100, 30)
-    st.caption(f"Leads below {min_score} will be excluded from the qualified download")
-
-
 # ── Niche Definition ──────────────────────────────────────────────────────────
 
 st.subheader("🎯 Step 1 — Define Your Niche")
@@ -157,10 +176,9 @@ st.caption("Be specific. This is passed directly to the AI when it reads each we
 
 niche_input = st.text_area(
     "What type of business are you targeting?",
-    value="Moving companies, movers, relocation services, and moving & storage businesses. "
-          "These are local or regional companies that help people and businesses move their "
-          "belongings from one location to another. They typically offer packing, loading, "
-          "transport, and storage services.",
+    value="Carpet cleaning companies and upholstery cleaning services. These are local or regional "
+          "owner-operated businesses that clean residential and commercial carpets, rugs, and upholstery. "
+          "They typically serve homeowners and small businesses in a local service area.",
     height=110,
 )
 
@@ -203,29 +221,25 @@ if uploaded_file:
         if not st.session_state.get("openai_key"):
             st.warning("⚠️ Add your OpenAI API key in the sidebar to enable AI extraction.")
 
-        # ── Run ───────────────────────────────────────────────────────────
+        # ── Run ───────────────────────────────────────────────────────────────
         if st.button("🚀 Start Enrichment", type="primary"):
-            if not st.session_state.get("openai_key"):
-                st.error("OpenAI API key required. Add it in the sidebar.")
-            else:
-                prompt = build_prompt(niche_input)
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+            prompt = build_prompt(niche_input)
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-                urls = df_sample[website_col].tolist()
-                results = asyncio.run(enrich_batch(urls, prompt, progress_bar, status_text))
+            urls = df_sample[website_col].tolist()
+            results = asyncio.run(enrich_batch(urls, prompt, progress_bar, status_text))
 
-                results_df = pd.DataFrame(results)
-                df_enriched = pd.concat([df_sample.reset_index(drop=True), results_df], axis=1)
+            results_df = pd.DataFrame(results)
+            df_enriched = pd.concat([df_sample.reset_index(drop=True), results_df], axis=1)
 
-                status_text.text("✅ Done!")
-                st.session_state["df_enriched"] = df_enriched
-                st.session_state["name_col"] = name_col
-                st.session_state["website_col"] = website_col
-                st.session_state["min_score"] = min_score
-                st.session_state["overrides"] = {}
+            status_text.text("✅ Done!")
+            st.session_state["df_enriched"] = df_enriched
+            st.session_state["name_col"] = name_col
+            st.session_state["website_col"] = website_col
+            st.session_state["overrides"] = {}
 
-        # ── Results ───────────────────────────────────────────────────────
+        # ── Results ───────────────────────────────────────────────────────────
         if "df_enriched" in st.session_state:
             df_enriched = st.session_state["df_enriched"]
             name_col_s = st.session_state["name_col"]
@@ -237,19 +251,23 @@ if uploaded_file:
             fits = df_enriched[df_enriched["fits_niche"] == True]
             doesnt_fit = df_enriched[df_enriched["fits_niche"] == False]
             unclear = df_enriched[df_enriched["fits_niche"].isna()]
-            high_score = df_enriched[df_enriched["score"] >= 60]
+            high_score = df_enriched[df_enriched["score"] >= MIN_SCORE]
+            multi_platform = df_enriched[df_enriched["multi_platform_mentions"] == True]
+            urgency = df_enriched[df_enriched["urgency_signal"] == True]
 
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
             c1.metric("✅ Fits Niche", len(fits))
             c2.metric("❌ Doesn't Fit", len(doesnt_fit))
             c3.metric("❓ Unclear", len(unclear))
             c4.metric("🔥 Score 60+", len(high_score))
+            c5.metric("📍 Multi-Platform", len(multi_platform))
+            c6.metric("⚡ Urgency Signal", len(urgency))
 
-            # ── Niche Rejection Pop-ups ───────────────────────────────────
+            # ── Niche Rejections ──────────────────────────────────────────────
             if len(doesnt_fit) > 0:
                 st.divider()
                 st.subheader("❌ Businesses That Don't Fit Your Niche")
-                st.caption("The AI flagged these as outside your niche. Review each one and override if needed.")
+                st.caption("Review each one and override if needed.")
 
                 if "overrides" not in st.session_state:
                     st.session_state["overrides"] = {}
@@ -269,7 +287,6 @@ if uploaded_file:
                             col_i1, col_i2 = st.columns(2)
                             col_i1.metric("Score", f"{score}/100")
                             col_i2.metric("Size", size or "Unknown")
-
                             if row.get("crawl_status") != "Success":
                                 st.warning(f"Crawl status: {row.get('crawl_status')}")
 
@@ -283,9 +300,10 @@ if uploaded_file:
                             )
                             st.session_state["overrides"][idx] = override
 
-            # ── Qualified Leads Table ─────────────────────────────────────
+            # ── Qualified Leads ───────────────────────────────────────────────
             st.divider()
             st.subheader("✅ Qualified Leads")
+            st.caption(f"Fits niche + score ≥ {MIN_SCORE}. Sorted by score descending.")
 
             overrides = st.session_state.get("overrides", {})
             override_indices = [idx for idx, val in overrides.items() if val == "Include anyway"]
@@ -294,19 +312,22 @@ if uploaded_file:
                 (df_enriched["fits_niche"] == True) |
                 (df_enriched.index.isin(override_indices))
             ].copy()
-            qualified = qualified[qualified["score"] >= st.session_state.get("min_score", 30)]
+            qualified = qualified[qualified["score"] >= MIN_SCORE]
             qualified = qualified.sort_values("score", ascending=False)
 
             display_cols = [
                 name_col_s, website_col_s, "score", "owner_name",
-                "estimated_company_size", "multi_location",
-                "contact_info_found", "site_appears_active", "crawl_status"
+                "owner_operated", "estimated_company_size",
+                "multi_platform_mentions", "platforms_found",
+                "review_cta_present", "testimonials_page",
+                "urgency_signal", "urgency_detail",
+                "site_appears_active", "crawl_status"
             ]
             display_cols = [c for c in display_cols if c in qualified.columns]
 
             st.dataframe(qualified[display_cols], use_container_width=True)
 
-            # ── Downloads ─────────────────────────────────────────────────
+            # ── Downloads ─────────────────────────────────────────────────────
             st.divider()
             st.subheader("📥 Download")
             col_dl1, col_dl2 = st.columns(2)
@@ -350,9 +371,13 @@ else:
         | ✅ Fits niche | Does this site match your target business type? |
         | ❌ Skip reason | If it doesn't fit — exactly why not |
         | 👤 Owner name | Founder or owner name from About/Team page |
-        | 📍 Multi-location | Does the business have multiple locations? |
+        | 🏠 Owner operated | Is there a named owner vs. corporate entity? |
         | 📏 Company size | Small / Medium / Large estimate |
-        | 🏆 Score 0-100 | How likely they need your service |
-        | 📞 Contact info | Is contact information visible on site? |
+        | 📍 Multi-platform | Mentions Yelp, Thumbtack, Angi, HomeAdvisor, BBB, Houzz, Google |
+        | 🔗 Platforms found | Which specific platforms were detected |
+        | 📢 Review CTA | Do they actively ask customers to leave reviews? |
+        | 📄 Testimonials page | Manual/static testimonials with no automation? |
+        | ⚡ Urgency signal | Mentions review platforms but has no management system |
+        | 🏆 Score 0-100 | How likely they need your review alert service |
         | 🌐 Site active | Does the site appear active/maintained? |
         """)
