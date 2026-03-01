@@ -35,38 +35,25 @@ Analyze this website and return ONLY a valid JSON object — no explanation, no 
   "fits_niche": true or false,
   "skip_reason": "required string if fits_niche is false, otherwise null",
   "owner_name": "string or null",
-  "owner_operated": true or false,
   "estimated_company_size": "small / medium / large",
   "site_appears_active": true or false,
   "multi_platform_mentions": true or false,
   "platforms_found": ["list of platforms found e.g. Yelp, Google, Thumbtack, Angi, HomeAdvisor, BBB, Houzz"],
-  "review_cta_present": true or false,
-  "testimonials_page": true or false,
-  "urgency_signal": true or false,
-  "urgency_detail": "string describing urgency signal if found, otherwise null",
   "score": 0-100
 }}
 
 DEFINITIONS:
 - multi_platform_mentions: Site mentions or links to any of these platforms: Yelp, Thumbtack, Google Reviews, Angi, HomeAdvisor, BBB, Houzz
-- review_cta_present: Site actively asks customers to leave a review (button, link, text prompt)
-- testimonials_page: Site has a manual/static testimonials or reviews page with no automated review widget
-- urgency_signal: Site mentions or links to review platforms but has NO system in place to manage or respond to them — indicating an unmanaged reputation gap
-- owner_operated: A named owner or founder is identifiable on the site (About page, bio, signature, etc.)
 
 SCORING GUIDE (score must stay between 0 and 100):
 
 ADD points:
-- multi_platform_mentions = true: +30
-- urgency_signal = true: +20
-- review_cta_present = false: +15
-- owner_operated = true: +15
-- testimonials_page = true (with no automation): +10
-- site_appears_active = true: +10
+- multi_platform_mentions = true: +40
+- site_appears_active = true: +60
 
 DEDUCT points:
-- site_appears_active = false: -30
-- owner_operated = false (corporate/franchise): -20
+- site_appears_active = false: -60
+- multi_platform_mentions = false: -20
 
 Score cannot go below 0 or above 100.
 If fits_niche is false, skip_reason must be a clear one-sentence explanation.
@@ -84,15 +71,10 @@ async def crawl_and_extract(url: str, prompt: str) -> dict:
         "fits_niche": None,
         "skip_reason": "Not crawled",
         "owner_name": None,
-        "owner_operated": None,
         "estimated_company_size": None,
         "site_appears_active": None,
         "multi_platform_mentions": None,
         "platforms_found": [],
-        "review_cta_present": None,
-        "testimonials_page": None,
-        "urgency_signal": None,
-        "urgency_detail": None,
         "score": 0,
         "crawl_status": "Not attempted"
     }
@@ -141,9 +123,7 @@ async def crawl_and_extract(url: str, prompt: str) -> dict:
         data["crawl_status"] = "Success"
         data["score"] = max(0, min(100, int(data.get("score", 0))))
 
-        for bool_field in ["fits_niche", "owner_operated", "site_appears_active",
-                           "multi_platform_mentions", "review_cta_present",
-                           "testimonials_page", "urgency_signal"]:
+        for bool_field in ["fits_niche", "site_appears_active", "multi_platform_mentions"]:
             val = data.get(bool_field)
             if isinstance(val, str):
                 data[bool_field] = val.lower() == "true"
@@ -253,15 +233,13 @@ if uploaded_file:
             unclear = df_enriched[df_enriched["fits_niche"].isna()]
             high_score = df_enriched[df_enriched["score"] >= MIN_SCORE]
             multi_platform = df_enriched[df_enriched["multi_platform_mentions"] == True]
-            urgency = df_enriched[df_enriched["urgency_signal"] == True]
 
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("✅ Fits Niche", len(fits))
             c2.metric("❌ Doesn't Fit", len(doesnt_fit))
             c3.metric("❓ Unclear", len(unclear))
             c4.metric("🔥 Score 60+", len(high_score))
             c5.metric("📍 Multi-Platform", len(multi_platform))
-            c6.metric("⚡ Urgency Signal", len(urgency))
 
             # ── Niche Rejections ──────────────────────────────────────────────
             if len(doesnt_fit) > 0:
@@ -317,10 +295,8 @@ if uploaded_file:
 
             display_cols = [
                 name_col_s, website_col_s, "score", "owner_name",
-                "owner_operated", "estimated_company_size",
+                "estimated_company_size",
                 "multi_platform_mentions", "platforms_found",
-                "review_cta_present", "testimonials_page",
-                "urgency_signal", "urgency_detail",
                 "site_appears_active", "crawl_status"
             ]
             display_cols = [c for c in display_cols if c in qualified.columns]
@@ -371,13 +347,9 @@ else:
         | ✅ Fits niche | Does this site match your target business type? |
         | ❌ Skip reason | If it doesn't fit — exactly why not |
         | 👤 Owner name | Founder or owner name from About/Team page |
-        | 🏠 Owner operated | Is there a named owner vs. corporate entity? |
         | 📏 Company size | Small / Medium / Large estimate |
         | 📍 Multi-platform | Mentions Yelp, Thumbtack, Angi, HomeAdvisor, BBB, Houzz, Google |
         | 🔗 Platforms found | Which specific platforms were detected |
-        | 📢 Review CTA | Do they actively ask customers to leave reviews? |
-        | 📄 Testimonials page | Manual/static testimonials with no automation? |
-        | ⚡ Urgency signal | Mentions review platforms but has no management system |
         | 🏆 Score 0-100 | How likely they need your review alert service |
         | 🌐 Site active | Does the site appear active/maintained? |
         """)
